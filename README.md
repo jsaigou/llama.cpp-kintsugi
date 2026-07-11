@@ -111,6 +111,47 @@ hardware limitation, not a software bug.
 - Fork documentation: `~/Documents/llama-enhance/kintsugi-documentation.md`
 - Full investigation: `~/Documents/llama-enhance/KINTSUGI_INVESTIGATION.md`
 
+### Backporting to Upstream
+
+The fix can be upstreamed as a series of small, independently reviewable PRs:
+
+**PR 1: `common/common.cpp` — `n_rs_seq` default for hybrid architectures**
+
+The simplest and highest-impact change. Sets `n_rs_seq = 4` when speculative
+decoding is not active. The downstream clamp in `llama-context.cpp:55-58` already
+handles architectures that don't support `rs_rollback`, so this is safe for all
+models. Justification: the recurrent memory already has the `rs_rollback`
+mechanism; it's simply never enabled outside of speculative decoding.
+
+**PR 2: `common/common.h` — `is_generation_checkpoint` field**
+
+Adds a boolean to `common_prompt_checkpoint` distinguishing generation-end
+checkpoints from prompt-processing checkpoints. Enables downstream code to
+prefer generation checkpoints for cross-turn restore.
+
+**PR 3: `server-context.cpp` — checkpoint save at generation end**
+
+Adds checkpoint creation at the end of every generation for hybrid models.
+This ensures a checkpoint exists for the next turn regardless of how many
+batches the prompt required.
+
+**PR 4: `server-context.cpp` — hybrid-aware checkpoint selection**
+
+When the SWA-based checkpoint search triggers, use position-independent
+selection for hybrid models (prefer generation checkpoints by flag, fall
+back to any valid checkpoint). Does not change the gate condition
+(`pos_min >= pos_min_thold`); only changes the search logic inside it.
+
+**PR 5: `server-context.cpp` — Vulkan pipeline barrier + erasure fix**
+
+Two small changes: `llama_synchronize()` after state restore (prevents GPU
+stale-cache reads on Vulkan's separate transfer/compute queues), and
+preserving checkpoints after forced resets for hybrid models.
+
+Each PR is small (~10-30 lines), affects a single file, and can be reviewed
+independently. Together they eliminate the crash at 88%+ context for hybrid
+SSM models on bandwidth-constrained hardware.
+
 ---
 
 [Manifesto](https://github.com/ggml-org/llama.cpp/discussions/205) / [ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md)
