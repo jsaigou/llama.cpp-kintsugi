@@ -14,6 +14,13 @@
 
 ## Why This Fork Exists
 
+> **Note on creation:** This fork was developed with substantial AI assistance.
+> While the upstream project's stance on AI-generated contributions is fully
+> respected, this fork exists because the maintainer needed a fix on a timeline
+> that didn't permit the upstream contribution process. The fork is private and
+> not submitted as a PR. Every change was reviewed, tested, and understood
+> before deployment.
+
 ### Problem
 
 Hybrid SSM models using the `qwen35moe` architecture — notably **Ornith-1.0-35B**
