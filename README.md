@@ -1,5 +1,7 @@
 # llama.cpp
 
+> **This is a private fork (`llama.cpp-kintsugi`).** See [Why This Fork Exists](#why-this-fork-exists) below.
+
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -7,6 +9,102 @@
 [![Server](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/server.yml)
 [![Docker](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/docker.yml)
 [![Winget](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml/badge.svg)](https://github.com/ggml-org/llama.cpp/actions/workflows/winget.yml)
+
+---
+
+## Why This Fork Exists
+
+### Problem
+
+Hybrid SSM models using the `qwen35moe` architecture — notably **Ornith-1.0-35B**
+and **Qwen3.6-35B-A3B** — crash at high context on AMD Strix Halo APUs (gfx1151,
+Vulkan backend). The crash is `ggml_abort` in `common_context_seq_rm`: the
+recurrent memory subsystem cannot handle partial sequence removal at 88%+
+context utilization (184K+ of 262K tokens) because it lacks snapshot planes
+for token rollback.
+
+The failure manifests during branching agentic conversations, where cache
+compaction triggers `seq_rm` to remove partial cells from the recurrent state.
+Without sufficient `n_rs_seq` snapshot planes, the removal fails and the server
+aborts. Upstream issue [#22450](https://github.com/ggml-org/llama.cpp/issues/22450)
+describes the identical symptom — slot hang after multi-turn cache invalidation
+on Qwen3.6-35B-A3B MoE.
+
+### Fix
+
+Two classes of changes across 3 files (84 insertions, 23 deletions):
+
+**Critical fix — `common/common.cpp:1595`:** Set `n_rs_seq = 4` when speculative
+decoding is not active. This allocates 4 snapshot planes for the recurrent state,
+enabling `seq_rm` to handle partial range removal at high context. Non-recurrent
+architectures are clamped to 0 downstream (`llama-context.cpp:55-58`), so this
+has zero impact on dense models.
+
+**Checkpoint correctness fixes — `server-context.cpp` + `common/common.h`:** Eight
+changes to the checkpoint subsystem for hybrid models:
+- Save a checkpoint at the end of every generation (captures recurrent state S_N)
+- Hybrid-aware checkpoint selection (position-independent search, not SWA-based)
+- `llama_synchronize()` after state restore (prevents GPU L1/L2 cache staleness on Vulkan)
+- Preserve checkpoints after forced resets (prevents erasure cascade)
+- Enforce minimum `--ctx-checkpoints` for hybrid models
+
+### Testing
+
+Methodology:
+
+1. **Context fill:** 611K chars of synthetic Python code loaded as a single user
+   message, reaching ~230K prompt tokens (88% of 262K) in ~900 seconds
+2. **Linear follow-up:** Send a follow-up question continuing the conversation —
+   verifies cache reuse at high context
+3. **Branching follow-up:** Send a different follow-up (not a continuation) —
+   triggers cache compaction and exercises the `seq_rm` partial removal path
+4. **Second branch:** Another branching question at higher context pressure
+
+Results on Ornith-1.0-35B Q8_0 (36.9 GB), Strix Halo Vulkan:
+
+| Test | Upstream | Kintsugi |
+|---|---|---|
+| Fill to 230K | Crashes at 184K (`ggml_abort`) | ✅ Completes |
+| Linear turn at 230K | — | ✅ 8s, cache reused, 28 t/s |
+| Branch turn 1 | — | ✅ 8s, no crash |
+| Branch turn 2 | — | ✅ 8s, no crash |
+
+### Affected Models
+
+| Model | Architecture | Fixed? |
+|---|---|---|
+| Ornith-1.0-35B | `qwen35moe` | ✅ |
+| Qwen3.6-35B-A3B | `qwen35moe` | ✅ |
+| Qwen3.6-35B-A3B-MTP | `qwen35moe` | ✅ |
+| Gemma 4 (all variants) | `gemma4` | Not affected |
+| GPT-OSS-120B | `gpt-oss` | Not affected |
+| All other models | — | Zero impact |
+
+### Deployment
+
+```bash
+# Build (Strix Halo / Vulkan)
+cmake -B build-vulkan -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON
+make -j16 llama-server
+
+# Run
+llama-server \
+  --model ornith-1.0-35b-Q8_0.gguf \
+  --ctx-size 262144 --n-gpu-layers 99 --parallel 1 \
+  --flash-attn on --jinja --ctx-checkpoints 16
+```
+
+`--ctx-checkpoints 16` is required for hybrid models (the fork enforces a
+minimum of 4 if omitted). Generation speed drops from ~52 t/s to ~28 t/s at
+high context due to attention scaling on 215 GB/s bandwidth — this is a
+hardware limitation, not a software bug.
+
+### Cross-references
+
+- Fork documentation: `~/Documents/llama-enhance/kintsugi-documentation.md`
+- Full investigation: `~/Documents/llama-enhance/KINTSUGI_INVESTIGATION.md`
+
+---
 
 [Manifesto](https://github.com/ggml-org/llama.cpp/discussions/205) / [ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md)
 
