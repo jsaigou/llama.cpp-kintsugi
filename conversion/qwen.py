@@ -553,7 +553,7 @@ class _Qwen35MtpMixin:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.block_count = self.hparams["num_hidden_layers"]
-        if not self.no_mtp:
+        if not self.no_mtp and self.hparams.get("mtp_use_dedicated_embeddings", True):
             self.block_count += self.hparams.get("mtp_num_hidden_layers", 0)
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
@@ -600,7 +600,7 @@ class _Qwen35MtpMixin:
         super().set_gguf_parameters()  # ty: ignore[unresolved-attribute]
         if self.no_mtp:
             return
-        if (n := self.hparams.get("mtp_num_hidden_layers", 0)) > 0:
+        if self.hparams.get("mtp_use_dedicated_embeddings", True) and (n := self.hparams.get("mtp_num_hidden_layers", 0)) > 0:
             self.gguf_writer.add_nextn_predict_layers(n)
 
     def prepare_metadata(self, vocab_only: bool):
